@@ -42,11 +42,12 @@ workflow-arena; its README says how a project sets that up). Its header says wha
    wait for the completion notice.
 
 4. **Record the run** right after it completes, before anything else:
-   `node .workflow-arena/tools/workflow-stats.mjs record <runId>`. With
-   `WORKFLOW_ARENA_DB_URL` and `WORKFLOW_ARENA_DB_TOKEN` set, the rows go to
-   the owner's private database and every session sees them (the
-   `tools/workflow-stats.mjs` header); without them they stay in a local
-   file, so say so. The session's transcripts it reads are cleaned up with
+   `node .workflow-arena/tools/workflow-stats.mjs record <runId>`. The rows
+   go to a local file, synced by nothing (the `tools/workflow-stats.mjs`
+   header). In a cloud session, also write
+   `node .workflow-arena/tools/workflow-stats.mjs export <runId>` to a file
+   the user can open, send it, and tell them to run `import` on it on their
+   machine. The session's transcripts it reads are cleaned up with
    old sessions. If a run was ever left unrecorded,
    `node .workflow-arena/tools/workflow-stats.mjs sweep` records every
    finished one still on disk.

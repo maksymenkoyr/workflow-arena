@@ -12,7 +12,7 @@ A `solo` setup has one agent do it all.
   step.
 - `tools/workflow-stats.mjs`: records finished runs from Claude Code's
   transcripts and prints the per-setup report. `tools/workflowStatsLib.mjs`
-  builds the rows, and `tools/rowStore.mjs` stores them.
+  builds the rows.
 
 Planned next: a blind grader, script-run checks (the real fix's tests,
 mutation testing), side-by-side judging and repeat runs. See
@@ -42,22 +42,11 @@ needs those scripts.
 
 ## Where the results go
 
-Results are one row per issue, stored outside the project.
-
-- **Shared:** set `WORKFLOW_ARENA_DB_URL` and `WORKFLOW_ARENA_DB_TOKEN` to
-  use a [Turso](https://turso.tech) database. It's free to start, and every
-  machine and cloud session reads and writes the same rows over HTTPS.
-  1. Create the database: `turso db create workflow-arena`, then
-     `turso db show workflow-arena --url` for the URL.
-  2. Create a token: `turso db tokens create workflow-arena`.
-  3. Set both variables in your shell profile and in the cloud
-     environment's settings, and allow `*.turso.io` in the cloud
-     environment's network policy if it's restricted.
-
-  The table is created on first use. To bring over rows recorded before,
-  run `node tools/workflow-stats.mjs import runs.jsonl`.
-- **Local:** without those variables, rows go to
-  `~/.claude/workflow-stats/runs.jsonl`, or to `WORKFLOW_STATS_FILE` if set.
+Results are one row per issue in `~/.claude/workflow-stats/runs.jsonl`, or
+in `WORKFLOW_STATS_FILE` if set, outside the project. Nothing syncs that
+file. To bring over a run recorded on another machine or in a cloud
+session, run `node tools/workflow-stats.mjs export <runId> > run.jsonl`
+there, then `node tools/workflow-stats.mjs import run.jsonl` here.
 
 ## Licence
 

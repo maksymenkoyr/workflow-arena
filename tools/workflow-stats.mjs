@@ -10,7 +10,8 @@
 //   node tools/workflow-stats.mjs report --issues         # plus one line per issue
 //   node tools/workflow-stats.mjs report --json           # the raw rows
 //   node tools/workflow-stats.mjs tokens [runId]           # per agent, latest run by default
-//   node tools/workflow-stats.mjs import rows.jsonl        # add rows another machine recorded
+//   node tools/workflow-stats.mjs export wf_d5233a2c-fd5   # one run's rows, to carry to another machine
+//   node tools/workflow-stats.mjs import rows.jsonl        # add rows another machine exported
 //
 // `record` finds the run under ~/.claude/projects/*/*/workflows/<runId>.json,
 // reads its journal and each agent's transcript next to it, and replaces any
@@ -20,36 +21,41 @@
 // completed run of the plan-code-review workflow that the store lacks, from
 // any session still on disk: the catch-up for runs nobody recorded.
 //
-// The store is one JSON row per issue, kept outside any project repo on
+// The store is one JSON row per issue in WORKFLOW_STATS_FILE, or
+// ~/.claude/workflow-stats/runs.jsonl, kept outside any project repo on
 // purpose: it's the owner's private log, and it outlives worktrees and
-// branches. With WORKFLOW_ARENA_DB_URL and WORKFLOW_ARENA_DB_TOKEN set it's a
-// private Turso database every machine and cloud session shares; without
-// them, WORKFLOW_STATS_FILE or ~/.claude/workflow-stats/runs.jsonl, synced by
-// nothing. rowStore.mjs says how the database and the offline fallback work.
+// branches. Nothing syncs it. A run recorded on another machine or in a cloud
+// session comes over by hand: `export <runId>` there, `import` here. A shared
+// database can come later, if the project is ever published.
 // `report` asks `gh` which branches have a merged PR, the slowest but most
 // honest signal of whether a run's work was any good. Pass --no-gh to skip it.
 //
 // Row building and the per-setup sums live in workflowStatsLib.mjs.
 
 import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { openStore } from "./rowStore.mjs";
-import { buildRows, forkIndex, renderReport, summarize, transcriptStats } from "./workflowStatsLib.mjs";
+import { buildRows, forkIndex, mergeRows, renderReport, summarize, transcriptStats } from "./workflowStatsLib.mjs";
 
-const STORE = openStore({
-  url: process.env.WORKFLOW_ARENA_DB_URL || undefined,
-  token: process.env.WORKFLOW_ARENA_DB_TOKEN || undefined,
-  file: process.env.WORKFLOW_STATS_FILE ?? join(homedir(), ".claude", "workflow-stats", "runs.jsonl"),
-  pending: join(homedir(), ".claude", "workflow-stats", "pending.jsonl"),
-});
+const STORE = process.env.WORKFLOW_STATS_FILE ?? join(homedir(), ".claude", "workflow-stats", "runs.jsonl");
 const PROJECTS = join(homedir(), ".claude", "projects");
 
 const [cmd, ...rest] = process.argv.slice(2);
 
 function readJsonl(path) {
   return readFileSync(path, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+}
+
+function readStore() {
+  return existsSync(STORE) ? readJsonl(STORE) : [];
+}
+
+/** Adds rows to the store, replacing any it has for the same runs. */
+function saveRows(added) {
+  mkdirSync(dirname(STORE), { recursive: true });
+  const rows = mergeRows(readStore(), added);
+  writeFileSync(STORE, rows.map((r) => JSON.stringify(r)).join("\n") + (rows.length ? "\n" : ""));
 }
 
 /** Every session's workflows/ directory under ~/.claude/projects. */
@@ -87,7 +93,7 @@ async function record(runId) {
 }
 
 async function sweep() {
-  const stored = new Set((await STORE.all()).map((r) => r.runId));
+  const stored = new Set(readStore().map((r) => r.runId));
   let found = 0;
   for (const dir of workflowDirs()) {
     for (const name of readdirSync(dir).filter((f) => /^wf_.*\.json$/.test(f))) {
@@ -104,7 +110,7 @@ async function sweep() {
       await recordFrom(runId, join(dir, name));
     }
   }
-  if (!found) console.log(`every completed plan-code-review run on disk is already in ${STORE.where}`);
+  if (!found) console.log(`every completed plan-code-review run on disk is already in ${STORE}`);
 }
 
 async function recordFrom(runId, recordPath) {
@@ -135,8 +141,8 @@ async function recordFrom(runId, recordPath) {
     ];
   });
   const rows = buildRows({ record: runRecord, agents, recordedAt: new Date().toISOString() });
-  await STORE.save(rows);
-  console.log(`recorded ${rows.length} issue(s) from ${runId} into ${STORE.where}`);
+  saveRows(rows);
+  console.log(`recorded ${rows.length} issue(s) from ${runId} into ${STORE}`);
   for (const r of rows) {
     console.log(`  #${r.issue} plan ${r.planGrade ?? "-"} code ${r.codeGrade ?? "-"}→${r.finalCodeGrade ?? "-"} · ${r.reviewRounds} review(s) · $${r.cost.toFixed(2)}${r.alreadyDone ? " · already done" : ""}`);
   }
@@ -145,7 +151,7 @@ async function recordFrom(runId, recordPath) {
 // One line per agent of one recorded run (the latest when no ID is given):
 // where the tokens went and what they cost.
 async function tokens(runId) {
-  const all = await STORE.all();
+  const all = readStore();
   const id = runId ?? all.at(-1)?.runId;
   const rows = all.filter((r) => r.runId === id);
   if (!rows.length) {
@@ -195,13 +201,13 @@ function prStates() {
 }
 
 async function report(flags) {
-  const rows = await STORE.all();
+  const rows = readStore();
   if (flags.includes("--json")) {
     console.log(JSON.stringify(rows, null, 2));
     return;
   }
   if (!rows.length) {
-    console.log(`no runs recorded yet in ${STORE.where}`);
+    console.log(`no runs recorded yet in ${STORE}`);
     return;
   }
   const prState = flags.includes("--no-gh") ? new Map() : prStates();
@@ -212,16 +218,24 @@ async function importRows(path) {
   if (!path) throw new Error("usage: workflow-stats import <rows.jsonl>");
   const rows = readJsonl(path);
   const runs = new Set(rows.map((r) => r.runId));
-  await STORE.save(rows);
-  console.log(`imported ${rows.length} row(s) from ${runs.size} run(s) into ${STORE.where}`);
+  saveRows(rows);
+  console.log(`imported ${rows.length} row(s) from ${runs.size} run(s) into ${STORE}`);
+}
+
+function exportRows(runId) {
+  if (!runId) throw new Error("usage: workflow-stats export <runId>");
+  const rows = readStore().filter((r) => r.runId === runId);
+  if (!rows.length) throw new Error(`no recorded run ${runId} in ${STORE}`);
+  process.stdout.write(rows.map((r) => JSON.stringify(r)).join("\n") + "\n");
 }
 
 if (cmd === "record") await record(rest[0]);
+else if (cmd === "export") exportRows(rest[0]);
 else if (cmd === "import") await importRows(rest[0]);
 else if (cmd === "sweep") await sweep();
 else if (cmd === "report") await report(rest);
 else if (cmd === "tokens") await tokens(rest[0]);
 else {
-  console.log("usage: workflow-stats record <runId> | sweep | import <rows.jsonl> | report [--issues] [--json] [--no-gh] | tokens [runId]");
+  console.log("usage: workflow-stats record <runId> | sweep | export <runId> | import <rows.jsonl> | report [--issues] [--json] [--no-gh] | tokens [runId]");
   process.exit(cmd ? 1 : 0);
 }
